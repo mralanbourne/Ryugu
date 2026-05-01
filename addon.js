@@ -1,17 +1,17 @@
 //===============
-// RYUGU STREMIO ADDON - LOGIC & PIPELINE
+// RYUGU ENGINE - LOGIC & PIPELINE
 //===============
 const { addonBuilder } = require("stremio-addon-sdk");
 const { getTrendingJav, searchJav } = require("./lib/tpdb");
 const { searchSukebeiForJav } = require("./lib/sukebei");
-const { checkRD, checkTorbox, getActiveRD, getActiveTorbox } = require("./lib/debrid");
-const { extractTags, parseSizeToBytes, determineCensorshipStatus } = require("./lib/parser");
+const { checkRD, checkTorbox } = require("./lib/debrid");
+const { extractTags, determineCensorshipStatus } = require("./lib/parser");
 
 const manifest = {
     id: "org.community.ryugu",
     version: "3.1.0",
     name: "Ryugu PRO",
-    description: "Semantic JAV Gateway with Debrid support.",
+    description: "Semantic JAV Search (Genre/Actress/Title) + Debrid Support.",
     types: ["movie"],
     resources: ["catalog", "meta", "stream"],
     catalogs: [
@@ -31,48 +31,33 @@ function parseConfig(config) {
     } catch (e) { return {}; }
 }
 
-//===============
-// CATALOG HANDLER (SEARCH & TRENDING)
-//===============
 builder.defineCatalogHandler(async ({ id, extra }) => {
     const ts = new Date().toISOString();
-    console.log(`[${ts}] [CATALOG] Req: ${id} | Query: "${extra.search || 'TRENDING'}"`);
-    
-    if (id === "jav_search" && extra.search) {
-        return { metas: await searchJav(extra.search) };
-    }
-    return { metas: await getTrendingJav() };
+    console.log(`[${ts}] [CATALOG] Request: ${id} | Query: "${extra.search || 'TRENDING'}"`);
+    const results = extra.search ? await searchJav(extra.search) : await getTrendingJav();
+    return { metas: results };
 });
 
 builder.defineMetaHandler(async ({ id }) => {
-    const ts = new Date().toISOString();
-    const cleanId = id.replace("jav_", "");
-    console.log(`[${ts}] [META] Fetching for: ${cleanId}`);
-    const results = await searchJav(cleanId);
+    const query = id.replace("jav_", "");
+    const results = await searchJav(query);
     return { meta: results[0] || null };
 });
 
-//===============
-// STREAM HANDLER (DEEP LOGGING PIPELINE)
-//===============
 builder.defineStreamHandler(async ({ id, config }) => {
     const ts = new Date().toISOString();
-    const javCode = id.replace("jav_", "").toUpperCase();
     const userConfig = parseConfig(config);
-    const BASE_URL = process.env.BASE_URL || "";
+    const javCode = id.replace("jav_", "").toUpperCase();
+    const BASE_URL = (process.env.BASE_URL || "").replace(/\/+$/, "");
 
     console.log(`\n[${ts}] ========== [PIPELINE START] ==========`);
-    console.log(`[${ts}] [CORE] Target: ${javCode}`);
+    console.log(`[${ts}] [CORE] Target ID: ${javCode}`);
 
     try {
         const torrents = await searchSukebeiForJav(javCode);
-        console.log(`[${ts}] [SUKEBEI] Results: ${torrents.length}`);
-
-        if (torrents.length === 0) return { streams: [] };
+        if (!torrents.length) return { streams: [] };
 
         const hashes = torrents.map(t => t.hash);
-        
-        // DEBRID CHECKS
         const [rdC, tbC] = await Promise.all([
             userConfig.rdKey ? checkRD(hashes, userConfig.rdKey) : Promise.resolve({}),
             userConfig.tbKey ? checkTorbox(hashes, userConfig.tbKey) : Promise.resolve({})
@@ -80,10 +65,9 @@ builder.defineStreamHandler(async ({ id, config }) => {
 
         const streams = [];
         torrents.forEach(t => {
+            const h = t.hash.toLowerCase();
             const { res, isVR } = extractTags(t.title);
             const censor = determineCensorshipStatus(t.title);
-            const isRD = rdC[t.hash.toLowerCase()];
-            const isTB = tbC[t.hash.toLowerCase()];
 
             if (userConfig.enableP2P) {
                 streams.push({
@@ -94,20 +78,27 @@ builder.defineStreamHandler(async ({ id, config }) => {
                 });
             }
 
-            if (isRD) {
+            if (rdC[h]) {
                 streams.push({
                     name: `RYUGU [RD+]\n${res}`,
                     description: `${censor.label}\n⚡ CACHED\n📄 ${t.title}\n💾 ${t.size}`,
                     url: `${BASE_URL}/resolve/realdebrid/${userConfig.rdKey}/${t.hash}`
                 });
             }
+
+            if (tbC[h]) {
+                streams.push({
+                    name: `RYUGU [TB+]\n${res}`,
+                    description: `${censor.label}\n📦 CACHED\n📄 ${t.title}\n💾 ${t.size}`,
+                    url: `${BASE_URL}/resolve/torbox/${userConfig.tbKey}/${t.hash}`
+                });
+            }
         });
 
-        console.log(`[${ts}] [PIPELINE] Generated ${streams.length} streams.`);
-        console.log(`[${ts}] ========== [PIPELINE END] ========== \n`);
-        return { streams };
+        console.log(`[${ts}] [PIPELINE] Found ${streams.length} total streams.`);
+        return { streams: streams.sort((a, b) => b.name.includes("+") - a.name.includes("+")) };
     } catch (err) {
-        console.error(`[${ts}] [ERROR] ${err.message}`);
+        console.error(`[${ts}] [STREAM FATAL] ${err.message}`);
         return { streams: [] };
     }
 });
