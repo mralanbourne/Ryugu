@@ -1,0 +1,10 @@
+services:
+  ryugu-addon:
+    build: .
+    container_name: ryugu
+    restart: on-failure:5
+    ports:
+      - "7000:7000"
+    environment:
+      - PORT=7000
+      - NODE_ENV=production
