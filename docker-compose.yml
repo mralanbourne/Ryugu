@@ -5,6 +5,25 @@ services:
     restart: on-failure:5
     ports:
       - "7000:7000"
+    env_file:
+      - .env
     environment:
       - PORT=7000
       - NODE_ENV=production
+    networks:
+      - stremio-network
+  flaresolverr:
+    image: ghcr.io/flaresolverr/flaresolverr:latest
+    container_name: flaresolverr
+    environment:
+      - LOG_LEVEL=info
+    ports:
+      - "8191:8191"
+    networks:
+      - stremio-network
+    restart: unless-stopped
+
+networks:
+  stremio-network:
+    name: stremio-internal-net
+    driver: bridge
