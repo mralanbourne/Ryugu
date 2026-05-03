@@ -1,12 +1,13 @@
 //===============
 // RYUGU STREMIO ADDON - CORE LOGIC
-// Angepasstes, cleanes UI-Rendering nach Yomi/Ryugu Standard.
+// Integrierte Amatsu-Architektur: Parallel Scraping, 3-Phasen-Sorter, 
+// 1:1 UI-Render Engine und Debrid-Kaskaden.
 //===============
 const { addonBuilder } = require("stremio-addon-sdk");
 const { getTrendingJav, searchJav } = require("./lib/tpdb");
-const { searchSukebeiForJav } = require("./lib/sukebei");
+const { searchAllSources } = require("./lib/scrapers");
 const { checkRD, checkTorbox, getActiveRD, getActiveTorbox } = require("./lib/debrid");
-const { extractJavCode, extractTags, parseSizeToBytes, determineCensorshipStatus, selectBestVideoFile } = require("./lib/parser");
+const { extractJavCode, extractTags, parseSizeToBytes, determineCensorshipStatus } = require("./lib/parser");
 
 let BASE_URL = process.env.BASE_URL || "http://127.0.0.1:7000";
 BASE_URL = BASE_URL.replace(/\/+$/, "");
@@ -31,7 +32,7 @@ const manifest = {
     version: "3.0.0",
     name: "Ryugu PRO",
     logo: "https://dummyimage.com/600x900/1a1a1a/e91e63.png?text=RYUGU",
-    description: "The ultimate JAV gateway. Based on Yomi Engine.",
+    description: "The ultimate JAV gateway. Based on Amatsu Engine.",
     types: ["movie"],
     resources: [
         "catalog",
@@ -53,12 +54,10 @@ builder.defineCatalogHandler(async ({ type, id, extra, config }) => {
         const metas = await getTrendingJav();
         return { metas: metas, cacheMaxAge: 43200 };
     }
-    
     if (id === "jav_search" && extra.search) {
         const searchResults = await searchJav(extra.search);
         return { metas: searchResults, cacheMaxAge: 86400 };
     }
-    
     return { metas: [] };
 });
 
@@ -91,7 +90,7 @@ builder.defineStreamHandler(async ({ type, id, config }) => {
         const tbKeyToUse = userConfig.tbKey || INTERNAL_TB_KEY;
         
         if (!userConfig.rdKey && !tbKeyToUse && !userConfig.enableP2P) {
-            console.log(`[PIPELINE] ABORT: Neither Debrid services nor P2P enabled.`);
+            console.log(`[PIPELINE] ABBRUCH: Weder Debrid-Dienste noch P2P aktiviert.`);
             return { streams: [] };
         }
         
@@ -99,8 +98,9 @@ builder.defineStreamHandler(async ({ type, id, config }) => {
         console.log(`\n========== [PIPELINE START] ==========`);
         console.log(`[PIPELINE] JAV ID: ${javCode}`);
         
-        let torrents = await searchSukebeiForJav(javCode);
-        console.log(`[PIPELINE] Raw Torrents: ${torrents.length}`);
+        // Nutzt jetzt die Amatsu Parallel-Architektur
+        let torrents = await searchAllSources(javCode);
+        console.log(`[PIPELINE] Raw Torrents aus allen Quellen: ${torrents.length}`);
         
         const allowedResolutions = Array.isArray(userConfig.resolutions) && userConfig.resolutions.length > 0 
             ? userConfig.resolutions 
@@ -114,7 +114,9 @@ builder.defineStreamHandler(async ({ type, id, config }) => {
             if (!allowedResolutions.includes(res)) return false;
             
             const cleanTitle = t.title.replace(/_/g, "-").toUpperCase();
-            if (!cleanTitle.includes(javCode)) return false;
+            // Strikter JAV Code Check, um False-Positives auszusortieren
+            const titleJavCode = extractJavCode(t.title);
+            if (!cleanTitle.includes(javCode) && titleJavCode !== javCode) return false;
             
             return true;
         });
@@ -129,7 +131,7 @@ builder.defineStreamHandler(async ({ type, id, config }) => {
         validTorrents = Array.from(uniqueTorrents.values());
         const hashes = validTorrents.map(t => t.hash);
         
-        console.log(`[PIPELINE] Starting Debrid query for ${hashes.length} hashes...`);
+        console.log(`[PIPELINE] Starte Debrid-Abfrage für ${hashes.length} Hashes...`);
         const [rdC, tbC, rdA, tbA] = await Promise.all([
             userConfig.rdKey ? checkRD(hashes, userConfig.rdKey).catch(() => ({})) : Promise.resolve({}),
             tbKeyToUse ? checkTorbox(hashes, tbKeyToUse).catch(() => ({})) : Promise.resolve({}),
@@ -150,12 +152,14 @@ builder.defineStreamHandler(async ({ type, id, config }) => {
             const seeders = t.seeders || 0;
             const vrTag = isVR ? " | VR" : "";
             
-            // Cleanes Layout wie im Screenshot
+            //===============
+            // 1:1 AMATSU UI RENDERING (Emojis & Struktur)
+            //===============
             
             if (userConfig.enableP2P) {
                 streams.push({
-                    name: `RYUGU [P2P]\n${res}`,
-                    description: `${censorData.label.trim().toUpperCase()}${vrTag}\nP2P\n${t.title}\n${t.size} | ${seeders} Seeds`,
+                    name: `RYUGU [⚡ P2P]\n🎥 ${res}`,
+                    description: `🌐 Source | ⚡ P2P\n🏷️ ${censorData.label.trim().toUpperCase()}${vrTag}\n📝 ${t.title}\n💾 ${t.size} | 👥 ${seeders} Seeds`,
                     infoHash: t.hash,
                     sources: [
                         "tracker:http://nyaa.tracker.wf:7777/announce",
@@ -171,19 +175,19 @@ builder.defineStreamHandler(async ({ type, id, config }) => {
             
             if (userConfig.rdKey) {
                 const isCached = filesRD && filesRD.length > 0;
-                let streamStatus = "Download";
-                let uiName = `RYUGU [RD]`;
+                let streamStatus = "⏳ Download";
+                let uiName = `RYUGU [🔴 RD]`;
                 
                 if (isCached) {
-                    uiName = `RYUGU [RD+]`; streamStatus = "Cached";
+                    uiName = `RYUGU [🟢 RD+]`; streamStatus = "🟢 Cached";
                 } else if (progRD !== undefined && progRD < 100) {
-                    uiName = `RYUGU [${progRD}% RD]`; streamStatus = `${progRD}% Downloading`;
+                    uiName = `RYUGU [⏳ ${progRD}% RD]`; streamStatus = `⏳ ${progRD}% Downloading`;
                 }
                 
                 if (!userConfig.hideUncached || isCached) {
                     streams.push({
-                        name: `${uiName}\n${res}`,
-                        description: `${censorData.label.trim().toUpperCase()}${vrTag}\n${streamStatus}\n${t.title}\n${t.size} | ${seeders} Seeds`,
+                        name: `${uiName}\n🎥 ${res}`,
+                        description: `🌐 Source | ${streamStatus}\n🏷️ ${censorData.label.trim().toUpperCase()}${vrTag}\n📝 ${t.title}\n💾 ${t.size} | 👥 ${seeders} Seeds`,
                         url: BASE_URL + "/resolve/realdebrid/" + userConfig.rdKey + "/" + t.hash + "/1",
                         behaviorHints: { bingeGroup: (isCached ? "rd_" : "dl_") + t.hash, notWebReady: !isCached },
                         _bytes: bytes, _isCached: isCached, _res: res, _prog: progRD || 0, _seeders: seeders, _isUncensored: censorData.isUncensored
@@ -193,19 +197,19 @@ builder.defineStreamHandler(async ({ type, id, config }) => {
             
             if (userConfig.tbKey) {
                 const isCached = filesTB && filesTB.length > 0;
-                let streamStatus = "Download";
-                let uiName = `RYUGU [TB]`;
+                let streamStatus = "⏳ Download";
+                let uiName = `RYUGU [☁️ TB]`;
                 
                 if (isCached) {
-                    uiName = `RYUGU [TB+]`; streamStatus = "Cached";
+                    uiName = `RYUGU [🟢 TB+]`; streamStatus = "🟢 Cached";
                 } else if (progTB !== undefined && progTB < 100) {
-                    uiName = `RYUGU [${progTB}% TB]`; streamStatus = `${progTB}% Downloading`;
+                    uiName = `RYUGU [⏳ ${progTB}% TB]`; streamStatus = `⏳ ${progTB}% Downloading`;
                 }
                 
                 if (!userConfig.hideUncached || isCached) {
                     streams.push({
-                        name: `${uiName}\n${res}`,
-                        description: `${censorData.label.trim().toUpperCase()}${vrTag}\n${streamStatus}\n${t.title}\n${t.size} | ${seeders} Seeds`,
+                        name: `${uiName}\n🎥 ${res}`,
+                        description: `🌐 Source | ${streamStatus}\n🏷️ ${censorData.label.trim().toUpperCase()}${vrTag}\n📝 ${t.title}\n💾 ${t.size} | 👥 ${seeders} Seeds`,
                         url: BASE_URL + "/resolve/torbox/" + userConfig.tbKey + "/" + t.hash + "/1",
                         behaviorHints: { bingeGroup: (isCached ? "tb_" : "dl_") + t.hash, notWebReady: !isCached },
                         _bytes: bytes, _isCached: isCached, _res: res, _prog: progTB || 0, _seeders: seeders, _isUncensored: censorData.isUncensored
@@ -214,19 +218,33 @@ builder.defineStreamHandler(async ({ type, id, config }) => {
             }
         });
         
+        //===============
+        // 3-PHASE SORTER (AMATSU LOGIC)
+        //===============
         return { streams: streams.sort((a, b) => {
-            const aUncen = a._isUncensored ? 1 : 0; const bUncen = b._isUncensored ? 1 : 0;
-            if (aUncen !== bUncen) return bUncen - aUncen;
+            const aUncen = a._isUncensored ? 1 : 0; 
+            const bUncen = b._isUncensored ? 1 : 0;
+            if (aUncen !== bUncen) return bUncen - aUncen; // Uncensored präferieren
             
-            if (a._prog > b._prog) return -1;
+            if (a._prog > 0 && b._prog === 0) return -1;
+            if (b._prog > 0 && a._prog === 0) return 1;
+            
             if (a._isCached !== b._isCached) return b._isCached ? 1 : -1;
-            if (!a._isCached && !b._isCached) { if (b._seeders !== a._seeders) return b._seeders - a._seeders; }
+            
+            const resMap = { "8K": 8, "4K": 4, "2K": 2, "1080p": 1, "720p": 0.5, "480p": 0.25, "SD": 0 };
+            const resScoreA = resMap[a._res] || 0;
+            const resScoreB = resMap[b._res] || 0;
+            if (resScoreA !== resScoreB) return resScoreB - resScoreA;
+            
+            if (!a._isCached && !b._isCached) { 
+                if (b._seeders !== a._seeders) return b._seeders - a._seeders; 
+            }
             
             return b._bytes - a._bytes;
         }), cacheMaxAge: 3600 };
         
     } catch (err) {
-        console.error(`[PIPELINE] FATAL ERROR:`, err.message); 
+        console.error(`[PIPELINE] FATAL ERROR:`, err.message);
         return { streams: [] };
     }
 });
